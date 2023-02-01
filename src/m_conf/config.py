@@ -1,3 +1,7 @@
+
+# Copyright (c) 2023 Leandro José Britto de Oliveira
+# Licensed under the MIT License.
+
 from __future__  import annotations
 from dataclasses import dataclass
 from enum        import Enum

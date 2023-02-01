@@ -1,3 +1,6 @@
+# Copyright (c) 2023 Leandro José Britto de Oliveira
+# Licensed under the MIT License.
+
 class ReadOnlyDict(dict):
     def __init__(self, wrapped: dict):
         assert isinstance(wrapped, dict)
