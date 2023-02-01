@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "m-conf"
+version = "0.1.0"
+description = "Mergeable configuration"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Leandro Oliveira" }]
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov"
+]
+
+[tool.pytest]
+addopts = []
+testpaths = ["tests"]
+pythonpath = ["src"]

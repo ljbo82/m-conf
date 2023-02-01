@@ -1,0 +1,43 @@
+{
+    "python.testing.pytestArgs": [
+        "--capture=no",
+        "tests"
+    ],
+
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+
+    "files.trimFinalNewlines": true,
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "editor.rulers": [80],
+
+    "editor.tokenColorCustomizations": {
+            "textMateRules": [
+                {
+                    "scope": "support.type.property-name.toml",
+                    "settings": {
+                        "foreground": "#d36770",
+                    }
+                },
+                {
+                    "scope": "support.type.property-name.table",
+                    "settings": {
+                        "foreground": "#4EC9B0",
+                    },
+                },
+                {
+                    "scope": "support.type.property-name.array",
+                    "settings": {
+                        "foreground": "#569CD6",
+                    }
+                },
+                {
+                    "scope": "constant.other.time",
+                    "settings": {
+                        "foreground": "#DCDCAA",
+                    }
+                }
+            ]
+        }
+}
