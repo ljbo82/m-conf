@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "m-conf"
-version = "0.1.1"
-description = "Mergeable configuration"
+version = "0.1.2"
+description = "Mergeable configuration parser"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Leandro Oliveira" }]
