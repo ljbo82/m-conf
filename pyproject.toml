@@ -7,7 +7,7 @@ name = "m-conf"
 version = "0.1.0"
 description = "Mergeable configuration"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Leandro Oliveira" }]
 requires-python = ">=3.11"
 dependencies = []
