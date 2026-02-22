@@ -17,6 +17,8 @@ where = ["src"]
 
 [project.optional-dependencies]
 dev = [
+    "build",
+    "twine",
     "pytest>=7.0",
     "pytest-cov"
 ]
