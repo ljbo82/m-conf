@@ -4,13 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "m-conf"
-version = "0.1.0"
+version = "0.1.1"
 description = "Mergeable configuration"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Leandro Oliveira" }]
 requires-python = ">=3.11"
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ljbo82/m-conf"
+Repository = "https://github.com/ljbo82/m-conf"
 
 [tool.setuptools.packages.find]
 where = ["src"]
