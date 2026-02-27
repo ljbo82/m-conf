@@ -1,591 +1,259 @@
-
 # Copyright (c) 2023-2026 Leandro José Britto de Oliveira
 # Licensed under the MIT License.
 
-from __future__  import annotations
-from enum        import Enum
-from io          import StringIO
-from typing      import Final, IO, Any
+from __future__       import annotations
+from .assignment_mode import AssignmentMode
+from .error           import *
+from dataclasses      import dataclass
+from typing           import Any
 
-import re
 import shlex
 
-class Parser:
-    class Error(Exception):
-        pass
+class Config(dict):
+    @dataclass(frozen=True)
+    class Entry:
+        key: str
+        value: str | list[str] | Config
+        section: Config
 
-    class AssignmentMode(Enum):
-        SET            = ('=')
-        REPLACE        = ('!=')
-        FALLBACK       = ('?=')
-        APPEND         = ('+=')
-        UNION          = ('^=')
+        @property
+        def path(self):
+            return self.key if not self.section.path else f"{self.section.path}.{self.key}"
 
-        __map: dict[str, Parser.AssignmentMode] = {}
+    def __init__(self, d: dict[str, Any] | None = None, *, parent: Config | None = None, key: str = ''):
+        if d is None:
+            d = {}
 
-        @classmethod
-        def from_str(cls, assignment: str) -> Parser.AssignmentMode | None:
-            assert isinstance(assignment, str)
-            return cls.__map.get(assignment)
+        assert_type (d, dict, 'd')
+        assert_type(parent, (Config, type(None)), 'parent')
+        assert_type(key, str, 'key')
 
-        def __init__(self, assignment):
-            self.__map[assignment] = self
+        assert (key and parent is not None) or (not key and parent is None)
 
-    class Dict(dict):
-        def __init__(self, parser: Parser, section: str = "", d: dict[str, Any] = {}):
-            assert isinstance(parser, Parser)
-            assert isinstance(section, str)
-            assert isinstance(d, dict)
+        self.__parent = parent
+        self.__key = key
+        self.__assignment_mode: dict[str, AssignmentMode] = {}
 
-            self.__parser = parser
-            self.__section = section
+        self.update(d)
 
-            if d and not isinstance(d, Parser.Dict):
-                _d = Parser.Dict(parser, section)
-                _d.update(d)
-                d = _d
+    def __getitem__(self, path: str) -> str | list[str] | Config | None:
+        entry = self.get(path)
+        if entry is None:
+            return None
 
-            super().__init__(d)
+        return entry.value
 
-        def __getitem__(self, key: str):
-            if not self.parser.nested_sections:
-                return super().__getitem__(key)
+    def __setitem__(self, path: str, value: str | list[str]):
+        self.assign(path, value)
 
-            tokens = key.split('.')
-            v = None
-            for i in range(0, len(tokens)):
-                token = tokens[i]
-                if v is not None and not isinstance(v, Parser.Dict):
-                    raise KeyError()
+    def __delitem__(self, path: str):
+        self.del_item(path)
 
-                v = super().__getitem__(token) if v is None else v[token]
+    @property
+    def parent(self) -> Config | None:
+        return self.__parent
 
-            return v
+    @property
+    def key(self) -> str:
+        return self.__key
 
-        def __setitem__(self, key: str, value: str | list[str] | Parser.Dict):
-            assert isinstance(key, str)
-            assert isinstance(value, (str, list, Parser.Dict))
+    @property
+    def path(self) -> str:
+        path = []
+        cfg = self
+        while cfg is not None and cfg.key:
+            path.insert(0, cfg.key)
+            cfg = cfg.parent
 
-            key = key.strip()
-            if not key:
-                assert self.parser.enable_default_section
-                assert isinstance(value, Parser.Dict)
+        return '.'.join(path)
 
-            if isinstance(value, str):
-                value = [v.strip() for v in shlex.split(value.strip())]
+    def assignment_mode(self, path: str) -> AssignmentMode | None:
+        assert_type(path, str, 'path')
 
-                _len = len(value)
-                if _len == 0 or _len == 1:
-                    value = '' if not _len else value[0]
+        entry = self.get(path)
 
-                if not value and not self.parser.allow_empty_values:
-                    raise Parser.Error('Empty value')
+        if entry is None:
+            return None
 
-            elif isinstance(value, list):
-                invalid = next((i for i, x in enumerate(value) if not isinstance(x, str)), None)
+        return entry.section.__assignment_mode[entry.key]
 
-                if invalid is not None:
-                    raise ValueError(f'Non string element at index {invalid}')
+    def __super_setitem(self, key, value):
+        super().__setitem__(key, value)
 
-                value = [v.strip() for v in value]
+    def __super_get(self, key, default):
+        return super().get(key, default)
 
-            if isinstance(value, list) and not self.parser.allow_empty_values and '' in value:
-                raise Parser.Error(f"Empty element at index {value.index('')}")
+    def __super_delitem(self, key):
+        super().__delitem__(key)
 
-            if not self.parser.nested_sections:
-                super().__setitem__(key, value)
-                return
+    def get(self, path: str, *, create_intermediate:bool = False) -> Config.Entry | None: # type: ignore
+        assert_type(create_intermediate, bool, 'create_intermediate')
+        assert_type(path, str, 'path')
 
-            tokens = key.split('.')
-            d = None
-            for i in range(0, len(tokens) - 1):
-                token = tokens[i].strip()
-                assert token or (i == 0 and self.parser.enable_default_section)
+        path = path.strip()
 
-                if d is not None and not isinstance(d, Parser.Dict):
-                    raise KeyError()
+        if not path:
+            raise PathError('Empty path')
 
-                if d is None:
-                    d = super().get(token, None)
-                    if d is None:
-                        d = Parser.Dict(self.parser, token)
-                        super().__setitem__(token, d)
-                else:
-                    _d = d.get(token, None)
-                    if _d is None:
-                        _d = Parser.Dict(self.parser, f"{d.section}.{token}")
-                        d[token] = _d
-                    d = _d
+        v = None
+        section = self
+        _path = ''
+        tokens = path.split('.')
+        token = ''
+        last_token_index = len(tokens) - 1
 
-            if d is None:
-                super().__setitem__(key, value)
+        for i in range(0, last_token_index + 1):
+            token = tokens[i]
+
+            if not token:
+                raise PathError('Invalid path')
+
+            _path = token if not _path else f"{_path}.{token}"
+
+            v = section.__super_get(token, None)
+
+            if v is None:
+                if not create_intermediate or i == last_token_index:
+                    return None
+
+                v = Config(parent=section, key=token)
+                section.__super_setitem(token, v)
+                section.__assignment_mode[token] = AssignmentMode.UNION
+
+            if i != last_token_index:
+                if not isinstance(v, Config):
+                    raise PathError(f"Path '{_path}' is already assigned")
+
+                section = v
+
+        if v is None:
+            return None
+
+        return Config.Entry(token, v, section)
+
+    def del_item(self, path: str) -> bool:
+        entry = self.get(path)
+
+        if entry is None:
+            return False
+
+        entry.section.__super_delitem(entry.key)
+        del entry.section.__assignment_mode[entry.key]
+        return True
+
+    def update(self, other: dict | None = None): # type: ignore
+        assert_type(other, dict, 'other')
+
+        for k, v in other.items(): # type: ignore
+            assert_type(k, str, f"other[{k}]", f"Invalid key type: {type(k).__name__ }")
+            assert_type(v, (str, list, dict), f"other[{k}]", f"Invalid value type: {type(v).__name__ }")
+
+            if isinstance(v, (str, list)):
+                self.assign(k, v, AssignmentMode.SET if not isinstance(other, Config) else other.assignment_mode(k)) # type: ignore (if there is a value, there is an associated assignment_mode)
             else:
-                if not isinstance(d, Parser.Dict):
-                    raise KeyError(f"'{'.'.join(tokens[:-1])}' is not a dict")
-
-                d[tokens[-1]] = value
-
-        def __delitem__(self, key: str):
-            super().pop(key, None)
-
-        @property
-        def parser(self) -> Parser:
-            return self.__parser
-
-        @property
-        def section(self) -> str:
-            return self.__section
-
-        def update(self, other: Any = None, **kwargs: Any) -> None:
-            assert isinstance(other, dict)
-
-            for k, v in other.items():
-                assert isinstance(k, str)
-                assert isinstance(v, (str, list, dict))
-
-                if isinstance(v, (str, list)):
-                    self[k] = v
+                d = self.get(k)
+                if d is None:
+                    v = Config(v, parent=self, key=k)
+                    self.__super_setitem(k, v)
+                    self.__assignment_mode[k] = AssignmentMode.UNION
                 else:
-                    self[k] = v if isinstance(v, Parser.Dict) else Parser.Dict(self.parser, f'{self.section}.{k}', v)
+                    if not isinstance(d, Config):
+                        raise AssignmentError(f"Path '{self.path}' is already assigned")
+                    d.update(v)
 
-        def assign(self, key: str, value: str | list[str], mode: Parser.AssignmentMode):
-            assert isinstance(key, str)
-            assert isinstance(value, (str, list))
-            assert isinstance(mode, Parser.AssignmentMode)
+    def assign(self, path: str, value: str | list[str], mode: AssignmentMode = AssignmentMode.SET, explode_value: bool = False) -> bool:
+        assert_type(path, str, 'path')
+        assert_type(value, (str, list), 'value')
+        assert_type(mode, AssignmentMode, 'mode')
 
-            key = key.strip()
-
-            if isinstance(value, str):
-                value = [v.strip() for v in shlex.split(value.strip())]
+        if isinstance(value, str):
+            value = value.strip()
+            if explode_value:
+                value = [v.strip().replace('\\n', '\n') for v in shlex.split(value)]
 
                 _len = len(value)
                 if _len == 0 or _len == 1:
                     value = '' if not _len else value[0]
 
-                if not value and not self.parser.allow_empty_values:
-                    raise Parser.Error('Empty value')
+        elif isinstance(value, list):
+            invalid = next((i for i, x in enumerate(value) if not isinstance(x, str)), None)
 
-            elif isinstance(value, list):
-                invalid = next((i for i, x in enumerate(value) if not isinstance(x, str)), None)
+            if invalid is not None:
+                raise TypeError(f'Non-string element at index {invalid}')
 
-                if invalid is not None:
-                    raise ValueError(f'Non string element at index {invalid}')
+            value = [v.strip() for v in value]
 
-                value = [v.strip() for v in value]
+        entry = self.get(path, create_intermediate=True)
 
-            if isinstance(value, list) and not self.parser.allow_empty_values and '' in value:
-                raise Parser.Error(f"Empty element at index {value.index('')}")
-
-            v = self.get(key, None)
-
-            # Key is alreay present in self...
-            if v is not None:
-                match mode:
-                    case Parser.AssignmentMode.SET:
-                        if not self.parser.set_is_replace:
-                            if isinstance(v, Parser.Dict):
-                                raise Parser.Error(f"Cannot replace section '{v.section}' by a value")
-                            else:
-                                prefix = "" if not self.section else f"[{self.section}] "
-                                raise Parser.Error(f"{prefix}Value already set for key '{key}'")
-
-                        self[key] = value
-
-                    case Parser.AssignmentMode.REPLACE:
-                        self[key] = value
-
-                    case Parser.AssignmentMode.FALLBACK:
-                        pass
-
-                    case Parser.AssignmentMode.APPEND:
-                        if isinstance(v, Parser.Dict):
-                            raise Parser.Error(f"Cannot add a value to section '{v.section}' without a key")
-
-                        if isinstance(v, str):
-                            v = [v] # Promote string to a list
-                            super().__setitem__(key, v)
-
-                        v.extend(value if isinstance(value, list) else [value])
-
-                    case Parser.AssignmentMode.UNION:
-                        if isinstance(v, Parser.Dict):
-                            raise Parser.Error(f"Cannot add a value to section '{v.section}' without a key")
-
-                        if isinstance(v, str):
-                            v = [v] # Promote string to a list
-                            super().__setitem__(key, v)
-
-                        _new_elements = []
-                        for new_element in value if isinstance(value, list) else [value]:
-                            if new_element not in v:
-                                _new_elements.append(new_element)
-
-                        v.extend(_new_elements)
-
-                    case _:
-                        raise NotImplementedError(f"AssignmentMode not supported: {mode}")
-                return
-
-            # Key is not present in self...
+        # Key is already present...
+        if entry is not None:
             match mode:
-                case Parser.AssignmentMode.APPEND | Parser.AssignmentMode.UNION:
-                    self[key] = [value] if isinstance(value, str) else value
+                case AssignmentMode.SET:
+                    raise AssignmentError(f"Path '{path}' is already assigned")
 
-                case Parser.AssignmentMode.SET | Parser.AssignmentMode.REPLACE | Parser.AssignmentMode.FALLBACK:
-                    self[key] = value
+                case AssignmentMode.REPLACE:
+                    entry.section.__super_setitem(entry.key, value)
+
+                case AssignmentMode.FALLBACK:
+                    return False
+
+                case AssignmentMode.APPEND:
+                    if isinstance(entry.value, Config):
+                        raise AssignmentError(f"Path '{path}' points to a section")
+
+                    if isinstance(entry.value, str):
+                        # Promote string to a list
+                        entry = Config.Entry(entry.key, [entry.value], entry.section)
+                        entry.section.__super_setitem(entry.key, entry.value)
+
+                    entry.value.extend(value if isinstance(value, list) else [value]) # type: ignore
+
+                case AssignmentMode.UNION:
+                    if isinstance(entry.value, Config):
+                        raise AssignmentError(f"Path '{path}' points to a section")
+
+                    if isinstance(entry.value, str):
+                        # Promote string to a list
+                        entry = Config.Entry(entry.key, [entry.value], entry.section)
+                        entry.section.__super_setitem(entry.key, entry.value)
+
+                    _new_elements = []
+                    for new_element in value if isinstance(value, list) else [value]:
+                        if new_element not in entry.value:
+                            _new_elements.append(new_element)
+
+                    if len(_new_elements) == 0:
+                        return False
+                    entry.value.extend(_new_elements) # type: ignore
 
                 case _:
-                    raise NotImplementedError()
+                    raise NotImplementedError(f"AssignmentMode not supported: {mode}")
 
-    class Context:
-        def __init__(self, ctx_id: str, d: Parser.Dict):
-            assert isinstance(ctx_id, str) and ctx_id
-            assert isinstance(d, Parser.Dict)
+            entry.section.__assignment_mode[entry.key] = mode
+            return True
 
-            self.__d = d
-            self.__line_number: int = 0
-            self.__ctx_id: str = ctx_id
-            self.__section: str | None = None
-            self.__restore_section = None
-            self.__reset()
+        # Key is not present...
+        tokens = path.split('.')
+        key = tokens[-1]
+        parent_section_path = '.'.join(tokens[:-1])
 
-        def __repr__(self):
-            return f"{self.ctx_id}:{self.line_number}"
+        if not parent_section_path:
+            section = self
+        else:
+            entry = self.get(parent_section_path, create_intermediate=True)
+            assert entry is not None
+            section = entry.value
 
-        @property
-        def parser(self) -> Parser:
-            return self.d.parser
+        match mode:
+            case AssignmentMode.APPEND | AssignmentMode.UNION:
+                value = [value] if isinstance(value, str) else value
 
-        @property
-        def d(self) -> Parser.Dict:
-            return self.__d
-
-        @property
-        def key(self) -> str | None:
-            return self.__key
-
-        @property
-        def assignment_mode(self) -> Parser.AssignmentMode | None:
-            return self.__assignment_mode
-
-        @property
-        def value(self) -> str | None:
-            return self.__value
-
-        @property
-        def continuation(self) -> bool:
-            return self.__continuation
-
-        @property
-        def line_number(self) -> int:
-            return self.__line_number
-
-        @property
-        def ctx_id(self) -> str:
-            return self.__ctx_id
-
-        @property
-        def section(self )-> str | None:
-            return self.__section
-
-        @section.setter
-        def section(self, section: str):
-            assert isinstance(section, str)
-            assert self.__restore_section is None
-            assert self.key is None
-            assert self.assignment_mode is None
-            assert self.value is None
-
-            if not section and not self.parser.enable_default_section:
-                raise Parser.Error(f"{self}: Default/Empty section not allowed")
-
-            self.__section = section
-            try:
-                v = self.d[section]
-                if isinstance(v, Parser.Dict) and not self.parser.allow_section_split:
-                    raise Parser.Error(f"{self}: Duplicate section: '{section}'")
-
-                if not isinstance(v, Parser.Dict):
-                    raise Parser.Error(f"{self}: Key '{section}' is already assigned to a value")
-            except KeyError:
-                self.apply()
-
-        def __reset(self):
-            self.__key: str | None = None
-            self.__value: str | None = None
-            self.__assignment_mode: Parser.AssignmentMode | None = None
-            self.__continuation: bool = False
-            if self.__restore_section is not None:
-                self.__section = self.__restore_section
-                self.__restore_section = None
-
-        def apply(self):
-            assert self.section is not None
-            assert self.parser.enable_default_section or self.section
-
-            try:
-                d = self.d[self.section]
-                assert isinstance(d, Parser.Dict)
-            except KeyError:
-                d = Parser.Dict(self.parser, self.section)
-                self.d[self.section] = d
-
-            if self.key is not None:
-                assert isinstance(self.key, str)
-                assert isinstance(self.value, str)
-                assert self.assignment_mode
-                assert not self.continuation
-
-                try:
-                    d.assign(self.key, self.value, self.assignment_mode)
-                except Parser.Error as ex:
-                    raise Parser.Error(f"{self}: {str(ex)}")
-
-            self.__reset()
-
-        def increment_line_number(self) -> int:
-            self.__line_number += 1
-            return self.__line_number
-
-        def assign(self, key: str, value: str, mode: Parser.AssignmentMode, continues: bool):
-            assert self.section is not None
-            assert self.key is None
-            assert self.value is None
-            assert self.assignment_mode is None
-            assert self.continuation is False
-
-            assert isinstance(key, str)
-            assert isinstance(value, str)
-            assert isinstance(mode, Parser.AssignmentMode)
-            assert isinstance(continues, bool)
-
-            self.__key = key
-            self.__value = value
-            self.__assignment_mode = mode
-            self.__continuation = continues
-
-            if not continues:
-                self.apply()
-
-        def continue_assignment(self, value: str, continues: bool):
-            assert self.key is not None
-            assert self.value is not None
-            assert self.assignment_mode is not None
-            assert self.continuation
-
-            assert isinstance(value, str)
-            assert isinstance(continues, bool)
-
-            value = value.strip()
-
-            if value:
-                self.__value = f"{self.value} {value.strip()}"
-
-            self.__continuation = continues
-
-            if not continues:
-                self.apply()
-
-        def set_nested_section(self, section: str):
-            assert isinstance(section, str) and section
-            assert self.section is not None
-            assert self.__restore_section is None
-
-            self.__restore_section = self.section
-            self.__section = f"{self.section}.{section}"
-
-            try:
-                v = self.d[self.section]
-                if not isinstance(v, Parser.Dict):
-                    raise Parser.Error(f"{self}: Key '{self.section}' is already assigned to a value")
-            except KeyError:
+            case AssignmentMode.SET | AssignmentMode.REPLACE | AssignmentMode.FALLBACK:
                 pass
 
-    # $1: Effective line. $2: Comment.
-    LINE: Final = re.compile(r"^(.*?)(?:(?<!\\)(#.*))?$")
+            case _:
+                raise NotImplementedError()
 
-    # $1: Section name
-    SECTION: Final = re.compile(r"^\[\s*(.*)\s*]$")
-
-    # $1: Section name
-    SECTION_NAME: Final = re.compile(r"^((?:\.?[\w-]+|\.?\*)*)$")
-
-    # $1: Key. $2 Assignmen operator. $3: Value
-    ASSIGNMENT: Final = re.compile(r"^([^?!=+^\s]*)\s*(=|!=|\?=|\+=|\^=)\s*(.*)(\\?)$")
-
-    # $1: Key
-    KEY: Final = re.compile(r"^([\w-]+(?:\.[\w-]+)*)$")
-
-    # $1: Value, $2: Continuation backlash
-    VALUE: Final = re.compile(r"^((?:[^\\]|\\\\|\\\s|\\'|\\\")*)(\\?)$")
-
-    def __init__(
-            self,
-            enable_default_section: bool = False, # [] section is allowed or assignments before any section are allowed.
-            allow_section_split:    bool = False, # Section is declared multiple times inside the same configuration.
-            set_is_replace:         bool = False, # Do NOT raise an error on attempt to replace an existing value without explicit '!='
-            allow_empty_values:     bool = False, # Allow a key being assigned to nothing?
-            nested_sections:        bool = False  # 'dotted.key = value' is interpreted as  as 'key = value' inside section 'dotted'. '[dotted.section]' will result in `{'dotted': {'section': {...}}}`. NOTE: 'dotted.key = value' cannot replace section [dotted.key]) -> None:
-    ):
-        self.__enable_default_section = enable_default_section
-        self.__allow_section_split = allow_section_split
-        self.__set_is_replace = set_is_replace
-        self.__allow_empty_values = allow_empty_values
-        self.__nested_sections = nested_sections
-
-    @property
-    def enable_default_section(self) -> bool:
-        return self.__enable_default_section
-
-    @property
-    def allow_section_split(self) -> bool:
-        return self.__allow_section_split
-
-    @property
-    def set_is_replace(self) -> bool:
-        return self.__set_is_replace
-
-    @property
-    def allow_empty_values(self) -> bool:
-        return self.__allow_empty_values
-
-    @property
-    def nested_sections(self) -> bool:
-        return self.__nested_sections
-
-    def __parse_empty(self, ctx: Parser.Context, line: str) -> bool:
-        if line:
-            return False
-
-        if ctx.key:
-            ctx.apply()
-
+        section.__super_setitem(key, value) # type: ignore
+        section.__assignment_mode[key] = mode # type: ignore
         return True
-
-    def __parse_continuation(self, ctx: Parser.Context, line: str) -> bool:
-        if not ctx.continuation:
-            return False
-
-        m = Parser.VALUE.match(line)
-        if not m:
-            raise Parser.Error(f"{ctx}: Malformed value")
-
-        ctx.continue_assignment(m.group(1).strip(), bool(m.group(2)))
-
-        return True
-
-    def __parse_assignment(self, ctx: Parser.Context, line: str) -> bool:
-        m = Parser.ASSIGNMENT.match(line)
-
-        if not m:
-            return False
-
-        if ctx.section is None:
-            if not self.enable_default_section:
-                raise Parser.Error(f"{ctx}: Expected a section")
-
-            self.__parse_section(ctx, "[]")
-
-        key: str = m.group(1)
-
-        mode = Parser.AssignmentMode.from_str(m.group(2))
-        if mode is None:
-            raise Parser.Error(f"Unknown assignment operator: '{mode}'")
-
-        value = m.group(3)
-
-        m = Parser.KEY.match(key)
-        if not m:
-            raise Parser.Error(f"{ctx}: Invalid key: '{key}'")
-
-        if '.' in key and self.nested_sections:
-            tokens = key.split('.')
-            key = tokens[-1]
-            ctx.set_nested_section(".".join(tokens[:-1]))
-
-        m = Parser.VALUE.match(value)
-        if not m:
-            raise Parser.Error(f"{ctx}: Malformed value")
-
-        value = m.group(1).strip()
-        continues = bool(m.group(2))
-
-        ctx.assign(key, value, mode, continues)
-        return True
-
-    def __parse_section(self, ctx: Parser.Context, line: str) -> bool:
-        m = Parser.SECTION.match(line)
-        if not m:
-            return False
-
-        name = m.group(1)
-
-        m = Parser.SECTION_NAME.match(name)
-        if not m or (name.startswith('.') and not self.enable_default_section and not self.nested_sections):
-            raise Parser.Error(f"{ctx}: Invalid section name: '{name}'")
-
-        ctx.section = name
-        return True
-
-    def __load(self, io: IO, ctx_id: str, d: dict = {}) -> dict:
-        result: Final = Parser.Dict(self, d=d)
-        ctx: Final = Parser.Context(ctx_id, result)
-
-        for line in io:
-            ctx.increment_line_number()
-
-            # Discard trailing comments and strip line.
-            line = Parser.LINE.match(line).group(1).strip() # type: ignore
-
-            if self.__parse_empty(ctx, line):
-                continue
-
-            if self.__parse_continuation(ctx, line):
-                continue
-
-            if self.__parse_assignment(ctx, line):
-                continue
-
-            if self.__parse_section(ctx, line):
-                continue
-
-            raise Parser.Error(f"{ctx}: Malformed line")
-
-        if ctx.continuation: # EOF without no empty line
-            ctx.apply()
-
-        return result
-
-    def load_file(self, f: str, d: dict = {}) -> dict:
-        with open(f, 'r') as io:
-            return self.__load(io, f, d)
-
-    def load_str(self, s: str, d: dict = {}, ctx_id: str = 'str') -> dict:
-        return self.__load(StringIO(s), ctx_id, d)
-
-    def batch_load_file(self, *files: str, d: dict = {}) -> dict:
-        _files = []
-        result = Parser.Dict(self)
-        try:
-            for f in files:
-                result = self.load_file(f, result)
-                _files.append(f)
-
-            return result
-        except Parser.Error as ex:
-            raise Parser.Error(f"{' > '.join(_files)} > {str(ex)}")
-
-    def batch_load_str(self, *strings: str, d: dict = {}, ctx_id_prefix = 'str#') -> dict:
-        ctx_ids = []
-        counter = 1
-        result = Parser.Dict(self)
-        try:
-            for s in strings:
-                ctx_id = f'{ctx_id_prefix}{counter}'
-                result = self.load_str(s, result, ctx_id)
-                ctx_ids.append(ctx_id)
-                counter += 1
-
-            return result
-        except Parser.Error as ex:
-            raise Parser.Error(f"{' > '.join(ctx_ids)} > {str(ex)}")

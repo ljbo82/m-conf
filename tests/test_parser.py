@@ -1,11 +1,13 @@
 # Copyright (c) 2023-2026 Leandro José Britto de Oliveira
 # Licensed under the MIT License.
 
-from m_conf.config import Parser
-import os
-import pytest
+from .      import assert_exception
+from m_conf import *
+from pytest import fixture
 
-@pytest.fixture(scope='module')
+import os
+
+@fixture(scope='module')
 def cwd():
     cwd = os.getcwd()
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -19,8 +21,8 @@ def test_config_single():
     key1 = value1
     """
 
-    d = Parser().load_str(cfg)
-    assert d == {'section': {'key1': 'value1'}}
+    cfg = Parser().load_str(cfg)
+    assert cfg == {'section': {'key1': 'value1'}}
 
 def test_config_multiple():
     cfg1 = """
@@ -33,74 +35,71 @@ def test_config_multiple():
     key2 = value2
     """
 
-    d = Parser().batch_load_str(cfg1, cfg2)
-    assert d == {'section1': {'key1': 'value1'}, 'section2': {'key2': 'value2'}}
+    cfg = Parser().batch_load_str(cfg1, cfg2)
+    assert cfg == {'section1': {'key1': 'value1'}, 'section2': {'key2': 'value2'}}
 
-def test_config_single_from_file(cwd):
-    d = Parser().load_file('configs/valid/001.cfg')
-    assert d == {'section': {'key1': 'value1'}}
+def test_config_empty_sections():
+    cfg = """\
+    [empty]
 
-def test_config_multiple_from_file(cwd):
-    d = Parser().batch_load_file('configs/valid/002/001.cfg', 'configs/valid/002/002.cfg')
-    assert d == {'section1': {'key1': 'value1'}, 'section2': {'key2': 'value2'}}
+    [section]
+    """
 
-def test_config_single_invalid_from_file(cwd):
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser().load_file('configs/invalid/001.cfg')
+    cfg = Parser().load_str(cfg)
+    assert cfg == {}
 
-    assert 'configs/invalid/001.cfg:1: Expected a section' == str(ex_info.value)
+def test_explode_value():
+    cfg = """\
+    [section]
+    value = 'value with spaces' another\\ value\\ with\\ spaces one two three "value\\nwith\\nnew\\nline"
+    """
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True).load_file('configs/invalid/001.cfg')
-
-    assert "configs/invalid/001.cfg:3: Duplicate section: ''" == str(ex_info.value)
-
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True, allow_section_split=True).load_file('configs/invalid/001.cfg')
-
-    assert "configs/invalid/001.cfg:4: Value already set for key 'key'" == str(ex_info.value)
-
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True, allow_section_split=True, set_is_replace=True).load_file('configs/invalid/001.cfg')
-
-    assert "configs/invalid/001.cfg:5: Empty value" == str(ex_info.value)
-
-    d = Parser(enable_default_section=True, allow_section_split=True, set_is_replace=True, allow_empty_values=True).load_file('configs/invalid/001.cfg')
-    assert d == {
-        '': {
-            'key': ['another', 'value'],
-            'empty': ''
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
+        'section': {
+            'value': [
+                'value with spaces',
+                'another value with spaces',
+                'one',
+                'two',
+                'three',
+                'value\nwith\nnew\nline'
+            ]
         }
     }
+
+    print(cfg['section']['value'][5]) # type: ignore
+
+def test_config_single_from_file(cwd):
+    cfg = Parser().load_file('configs/valid/001.cfg')
+    assert cfg == {'section': {'key1': 'value1'}}
+
+def test_config_multiple_from_file(cwd):
+    cfg = Parser().batch_load_file('configs/valid/002/001.cfg', 'configs/valid/002/002.cfg')
+    assert cfg == {'section1': {'key1': 'value1'}, 'section2': {'key2': 'value2'}}
+
+def test_config_single_invalid_from_file(cwd):
+    with assert_exception(ParsingError, "configs/invalid/001.cfg:3: Path 'key' is already assigned"):
+        Parser().load_file('configs/invalid/001.cfg')
+
+    with assert_exception(ParsingError, "configs/invalid/001.cfg:4: Path 'nested.section.key' is already assigned"):
+        Parser(set_is_replace=True).load_file('configs/invalid/001.cfg')
 
 def test_config_multiple_invalid_from_file(cwd):
     files = ('configs/invalid/002/001.cfg','configs/invalid/002/002.cfg')
-    with pytest.raises(Parser.Error) as ex_info:
+
+    with assert_exception(ParsingError, "configs/invalid/002/001.cfg > configs/invalid/002/002.cfg:5: Path 'section1.key1' is already assigned"):
         Parser().batch_load_file(*files)
 
-    assert "configs/invalid/002/001.cfg > configs/invalid/002/002.cfg:3: Empty value" == str(ex_info.value)
-
-    d = Parser(allow_empty_values=True).batch_load_file(*files)
-    assert d == {
+    cfg = Parser(set_is_replace=True).batch_load_file(*files)
+    assert cfg == {
         'section1': {
-            'key1': 'value1'
+            'key1': 'another1' # This value came from 002.cfg
         },
         'section2': {
             'key2': 'value2',
-            'empty': ''
         }
     }
-
-def test_config_context_str():
-    cfg = """ \
-    [section]
-    key = value
-    """
-
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser().batch_load_str(cfg, cfg)
-
-    assert "str#1 > str#2:1: Duplicate section: 'section'" == str(ex_info.value)
 
 def test_config_context_str_custom_prefix():
     cfg = """ \
@@ -108,34 +107,25 @@ def test_config_context_str_custom_prefix():
     key = value
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
+    with assert_exception(ParsingError, "cfg-1 > cfg-2:2: Path 'section.key' is already assigned"):
         Parser().batch_load_str(cfg, cfg, ctx_id_prefix="cfg-")
-
-    assert "cfg-1 > cfg-2:1: Duplicate section: 'section'" == str(ex_info.value)
 
 def test_config_single_explicit_default_section():
     cfg = """ \
     []
     key = value
     """
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser().load_str(cfg)
-    assert 'str:1: Default/Empty section not allowed' == str(ex_info.value)
 
-    d = Parser(enable_default_section=True).load_str(cfg)
-    assert d == {'': {'key': 'value'}}
+    cfg = Parser().load_str(cfg)
+    assert cfg == {'key': 'value'}
 
 def test_config_single_implicity_default_section():
     cfg = """ \
     key = value
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser().load_str(cfg)
-    assert 'str:1: Expected a section' == str(ex_info.value)
-
-    d = Parser(enable_default_section=True).load_str(cfg)
-    assert d == {'': {'key': 'value'}}
+    cfg = Parser().load_str(cfg)
+    assert cfg == {'key': 'value'}
 
 def test_config_single_split_default_section():
     cfg = """ \
@@ -143,13 +133,8 @@ def test_config_single_split_default_section():
     []
     key2 = value2
     """
-
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True).load_str(cfg)
-    assert "str:2: Duplicate section: ''" == str(ex_info.value)
-
-    d = Parser(enable_default_section=True, allow_section_split=True).load_str(cfg)
-    assert d == {'': {'key1': 'value1', 'key2': 'value2'}}
+    cfg = Parser().load_str(cfg)
+    assert cfg == {'key1': 'value1', 'key2': 'value2'}
 
 def test_config_single_set_override_in_implicit_default_section():
     cfg = """ \
@@ -157,12 +142,11 @@ def test_config_single_set_override_in_implicit_default_section():
     key1 = another_value
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True).load_str(cfg)
-    assert "str:2: Value already set for key 'key1'" == str(ex_info.value)
+    with assert_exception(ParsingError, "str:2: Path 'key1' is already assigned"):
+        Parser().load_str(cfg)
 
-    d = Parser(enable_default_section=True, set_is_replace=True).load_str(cfg)
-    assert d == {'': {'key1': 'another_value'}}
+    cfg = Parser(set_is_replace=True).load_str(cfg)
+    assert cfg == {'key1': 'another_value'}
 
 def test_config_single_set_override_in_splitted_default_section():
     cfg = """ \
@@ -171,12 +155,11 @@ def test_config_single_set_override_in_splitted_default_section():
     key1 = another_value
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True, allow_section_split=True).load_str(cfg)
-    assert "str:3: Value already set for key 'key1'" == str(ex_info.value)
+    with assert_exception(ParsingError, "str:3: Path 'key1' is already assigned"):
+        Parser().load_str(cfg)
 
-    d = Parser(enable_default_section=True, allow_section_split=True, set_is_replace=True).load_str(cfg)
-    assert d == {'': {'key1': 'another_value'}}
+    cfg = Parser(set_is_replace=True).load_str(cfg)
+    assert cfg == {'key1': 'another_value'}
 
 def test_config_single_set_override_in_explicit_default_section():
     cfg = """ \
@@ -185,31 +168,25 @@ def test_config_single_set_override_in_explicit_default_section():
     key1 = another_value
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True).load_str(cfg)
-    assert "str:3: Value already set for key 'key1'" == str(ex_info.value)
+    with assert_exception(ParsingError, "str:3: Path 'key1' is already assigned"):
+        Parser().load_str(cfg)
 
-    d = Parser(enable_default_section=True, set_is_replace=True).load_str(cfg)
-    assert d == {'': {'key1': 'another_value'}}
+    cfg = Parser(set_is_replace=True).load_str(cfg)
+    assert cfg == {'key1': 'another_value'}
 
 def test_config_single_empty_value_in_implicit_default_section():
     cfg = """ \
     key1 =
     """
-
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True).load_str(cfg)
-    assert "str:1: Empty value" == str(ex_info.value)
-
-    d = Parser(enable_default_section=True, allow_empty_values=True).load_str(cfg)
-    assert d == {'': {'key1': ''}}
+    d = Parser().load_str(cfg)
+    assert d == {'key1': ''}
 
     cfg = """ \
     key1 = ''
     """
 
-    d = Parser(enable_default_section=True, allow_empty_values=True).load_str(cfg)
-    assert d == {'': {'key1': ''}}
+    cfg = Parser().load_str(cfg)
+    assert cfg == {'key1': ''}
 
 def test_config_single_empty_value_override_in_implicit_default_section():
     cfg = """ \
@@ -217,16 +194,11 @@ def test_config_single_empty_value_override_in_implicit_default_section():
     key1 =
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True).load_str(cfg)
-    assert "str:2: Empty value" == str(ex_info.value)
+    with assert_exception(ParsingError, "str:2: Path 'key1' is already assigned"):
+        Parser().load_str(cfg)
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True, allow_empty_values=True).load_str(cfg)
-    assert "str:2: Value already set for key 'key1'" == str(ex_info.value)
-
-    d = Parser(enable_default_section=True, set_is_replace=True, allow_empty_values = True).load_str(cfg)
-    assert d == {'': {'key1': ''}}
+    cfg = Parser(set_is_replace=True).load_str(cfg)
+    assert cfg == {'key1': ''}
 
 def test_config_single_empty_value_override_in_splitted_default_section():
     cfg = """ \
@@ -235,16 +207,11 @@ def test_config_single_empty_value_override_in_splitted_default_section():
     key1 =
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True, allow_section_split=True).load_str(cfg)
-    assert "str:3: Empty value" == str(ex_info.value)
+    with assert_exception(ParsingError, "str:3: Path 'key1' is already assigned"):
+        Parser().load_str(cfg)
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True, allow_section_split=True, allow_empty_values=True).load_str(cfg)
-    assert "str:3: Value already set for key 'key1'" == str(ex_info.value)
-
-    d = Parser(enable_default_section=True, allow_section_split=True, set_is_replace=True, allow_empty_values=True).load_str(cfg)
-    assert d == {'': {'key1': ''}}
+    cfg = Parser(set_is_replace=True).load_str(cfg)
+    assert cfg == {'key1': ''}
 
 def test_config_single_empty_value_is_trimmed():
     cfg = '''\
@@ -252,13 +219,8 @@ def test_config_single_empty_value_is_trimmed():
     key = '    '
     '''
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser().load_str(cfg)
-
-    assert 'str:2: Empty value' == str(ex_info.value)
-
-    d = Parser(allow_empty_values=True).load_str(cfg)
-    assert d == {'section': {'key': ''}}
+    cfg = Parser().load_str(cfg)
+    assert cfg == {'section': {'key': ''}}
 
 def test_config_single_empty_elements_are_trimmed():
     cfg = '''\
@@ -266,8 +228,8 @@ def test_config_single_empty_elements_are_trimmed():
     key = '   value one   ' '   value two   '
     '''
 
-    d = Parser().load_str(cfg)
-    assert d == {'section': {'key': ['value one', 'value two']}}
+    cfg = Parser().load_str(cfg)
+    assert cfg == {'section': {'key': ['value one', 'value two']}}
 
 def test_config_single_set_override():
     cfg = """\
@@ -276,13 +238,11 @@ def test_config_single_set_override():
     key = replaced
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
+    with assert_exception(ParsingError, "str:3: Path 'section.key' is already assigned"):
         Parser().load_str(cfg)
-    assert "str:3: [section] Value already set for key 'key'" == str(ex_info.value)
 
-
-    d = Parser(set_is_replace=True).load_str(cfg)
-    assert d == {'section': {'key': 'replaced'}}
+    cfg = Parser(set_is_replace=True).load_str(cfg)
+    assert cfg == {'section': {'key': 'replaced'}}
 
 def test_config_single_set_override_in_splitted_section():
     cfg = """\
@@ -292,25 +252,23 @@ def test_config_single_set_override_in_splitted_section():
     [section2]
     some = value
 
-    [section3]
+    [section3] # This will be skipped since it is empty
 
     [section1]
     key = replaced
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(allow_section_split=True).load_str(cfg)
-    assert "str:10: [section1] Value already set for key 'key'" == str(ex_info.value)
+    with assert_exception(ParsingError, "str:10: Path 'section1.key' is already assigned"):
+        Parser().load_str(cfg)
 
-    d = Parser(allow_section_split=True, set_is_replace=True).load_str(cfg)
-    assert d == {
+    cfg = Parser(set_is_replace=True).load_str(cfg)
+    assert cfg == {
         'section1': {
             'key': 'replaced'
         },
         'section2': {
             'some': 'value'
         },
-        'section3': {}
     }
 
 def test_config_single_fallback():
@@ -321,8 +279,8 @@ def test_config_single_fallback():
     another ?= value
     """
 
-    d = Parser().load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'some':  'value',
             'another': 'value'
@@ -334,20 +292,19 @@ def test_config_single_fallback_in_splitted_section():
     [section]
     some = value
 
-    [another_section]
+    [another_section] # this is skipped since there are no entries
 
     [section]
     some ?= replacement
     another ?= value
     """
 
-    d = Parser(allow_section_split=True).load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'some':  'value',
             'another': 'value'
-        },
-        'another_section': {}
+        }
     }
 
 def test_config_single_replace():
@@ -357,8 +314,8 @@ def test_config_single_replace():
     some != replacement
     """
 
-    d = Parser().load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'some':  'replacement'
         }
@@ -373,8 +330,8 @@ def test_config_single_replace_in_splitted_section():
     some != replacement
     """
 
-    d = Parser(allow_section_split=True).load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'some':  'replacement'
         }
@@ -386,8 +343,8 @@ def test_config_single_add_empty_once():
     some +=
     """
 
-    d = Parser(allow_empty_values=True).load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'some':  ['']
         }
@@ -400,8 +357,8 @@ def test_config_single_add_empty_twice():
     some +=
     """
 
-    d = Parser(allow_empty_values=True).load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'some':  ['', '']
         }
@@ -414,8 +371,8 @@ def test_config_single_add():
     some += value2
     """
 
-    d = Parser().load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'some':  ['value1', 'value2']
         }
@@ -430,8 +387,8 @@ def test_config_single_add_in_splitted_section():
     some += value2
     """
 
-    d = Parser(allow_section_split=True).load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'some':  ['value1', 'value2']
         }
@@ -443,8 +400,8 @@ def test_config_single_union_empty_once():
     some ^=
     """
 
-    d = Parser(allow_empty_values=True).load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'some':  ['']
         }
@@ -457,8 +414,8 @@ def test_config_single_union_empty_twice():
     some ^=
     """
 
-    d = Parser(allow_empty_values=True).load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'some':  ['']
         }
@@ -471,8 +428,8 @@ def test_config_single_union():
     key ^= a b c d
     """
 
-    d = Parser().load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'key':  ['a', 'c', 'b', 'd']
         }
@@ -487,8 +444,8 @@ def test_config_single_union_in_splitted_section():
     key ^= a b c d
     """
 
-    d = Parser(allow_section_split=True).load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'key':  ['a', 'c', 'b', 'd']
         }
@@ -497,18 +454,18 @@ def test_config_single_union_in_splitted_section():
 def test_config_single_assignment_continuation():
     cfg = """\
     [section1]
-    key = a b   \
-      c d \
-      e f\
+    key = a b   \\
+      c d \\
+      e f\\
       g
 
     [section2]
-    key = a \
+    key = a \\
     b
     """
 
-    d = Parser(allow_section_split=True).load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section1': {
             'key':  ['a', 'b', 'c', 'd', 'e', 'f', 'g']
         },
@@ -529,11 +486,21 @@ def test_config_single_valid_exotic_section_names():
     key = c
     """
 
-    d = Parser().load_str(cfg)
-    assert d == {
-        '*':  {'key': 'a'},
-        '*.*': {'key': 'b'},
-        '*.a.*.c': {'key': 'c'}
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
+        '*':  {
+            'key': 'a',
+            '*' : {
+                'key': 'b'
+            },
+            'a': {
+                '*': {
+                    'c': {
+                        'key': 'c'
+                    }
+                }
+            }
+        }
     }
 
 def test_config_single_invalid_section_names():
@@ -542,55 +509,41 @@ def test_config_single_invalid_section_names():
     key = a
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
+    with assert_exception(ParsingError, "str:1: Invalid path: '*.'"):
         Parser().load_str(cfg)
 
-    assert "str:1: Invalid section name: '*.'" == str(ex_info.value)
 
     cfg = """\
-    [.abc] # This is valid only if default section is enabled and nested sections are enabled.
+    [.abc]
     key = a
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
+    with assert_exception(ParsingError, "str:1: Invalid path: '.abc'"):
         Parser().load_str(cfg)
 
-    assert "str:1: Invalid section name: '.abc'" == str(ex_info.value)
-
     cfg = """\
-    [abc.] # invalid even with nested sections
+    [abc.]
     key = a
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
+    with assert_exception(ParsingError, "str:1: Invalid path: 'abc.'"):
         Parser().load_str(cfg)
 
-    assert "str:1: Invalid section name: 'abc.'" == str(ex_info.value)
-
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(nested_sections=True).load_str(cfg)
-
-    assert "str:1: Invalid section name: 'abc.'" == str(ex_info.value)
-
-def test_config_single_invalid_key_values():
+def test_config_single_invalid_path_on_assignment():
     cfg = """\
     .a.b.c = value
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True, nested_sections=True).load_str(cfg)
-
-    assert "str:1: Invalid key: '.a.b.c'" == str(ex_info.value)
+    with assert_exception(ParsingError, "str:1: Invalid path: '.a.b.c'"):
+        Parser().load_str(cfg)
 
     cfg = """\
     [section]
     .a.b.c = value
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(enable_default_section=True, nested_sections=True).load_str(cfg)
-
-    assert "str:2: Invalid key: '.a.b.c'" == str(ex_info.value)
+    with assert_exception(ParsingError, "str:2: Invalid path: '.a.b.c'"):
+        Parser().load_str(cfg)
 
 def test_config_single_nested_sections():
     cfg = """\
@@ -598,11 +551,8 @@ def test_config_single_nested_sections():
     sub.key = value
     """
 
-    d = Parser().load_str(cfg)
-    assert d == {'section': {'sub.key' : 'value'}}
-
-    d = Parser(nested_sections=True).load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'sub': {
                 'key' : 'value'
@@ -615,52 +565,27 @@ def test_config_single_nested_sections_on_implicit_default_section():
     a.b.c = value
     """
 
-    d = Parser(enable_default_section=True, nested_sections=True).load_str(cfg)
-    assert d == {
-        "": {
-            'a': {
-                'b': {
-                    'c': 'value'
-                }
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
+        'a': {
+            'b': {
+                'c': 'value'
             }
         }
     }
-
-    #assert "str#1:1: Invalid key: '.a.b.c'" == str(ex_info.value)
 
 def test_config_single_nested_sections_on_explicit_default_section():
     # [.not.valid.section] is valid only if default section is enabled and
     # nested sections are enabled.
     cfg = """\
-    [.a.b.c]
-    key = value
-    a.b = c
-
     []
     x.y += z # NOTE: it will become an array
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser().load_str(cfg)
-
-    assert "str:1: Invalid section name: '.a.b.c'" == str(ex_info.value)
-
-    d = Parser(nested_sections=True, enable_default_section=True, allow_section_split=True).load_str(cfg)
-    assert d == {
-        '': {
-            'a': {
-                'b': {
-                    'c' : {
-                        'key' : 'value',
-                        'a' : {
-                            'b': 'c'
-                        },
-                    }
-                }
-            },
-            'x': {
-                'y': ['z']
-            }
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
+        'x': {
+            'y': ['z']
         }
     }
 
@@ -673,19 +598,8 @@ def test_config_single_nested_section_never_cannot_override_value():
     b = c
     """
 
-    d = Parser().load_str(cfg)
-    assert d == {
-        'section': {
-            'key': 'value'
-        },
-        'section.key': {
-            'b': 'c'
-        }
-    }
-
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(nested_sections=True).load_str(cfg)
-    assert "str:4: Key 'section.key' is already assigned to a value" == str(ex_info.value)
+    with assert_exception(ParsingError, "str:4: Path 'section.key' is already assigned"):
+        Parser().load_str(cfg)
 
     cfg = """\
     [section]
@@ -695,9 +609,8 @@ def test_config_single_nested_section_never_cannot_override_value():
     key.sub = test
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(nested_sections=True, allow_section_split=True).load_str(cfg)
-    assert "str:5: Key 'section.key' is already assigned to a value" == str(ex_info.value)
+    with assert_exception(ParsingError, "str:5: Path 'section.key' is already assigned"):
+        Parser().load_str(cfg)
 
 def test_config_single_value_cannot_override_section():
     cfg = """\
@@ -711,9 +624,16 @@ def test_config_single_value_cannot_override_section():
     sub = test
     """
 
-    with pytest.raises(Parser.Error) as ex_info:
-        Parser(allow_section_split=True, nested_sections=True).load_str(cfg)
-    assert "str:8: Cannot replace section 'section.sub' by a value" == str(ex_info.value)
+    with assert_exception(ParsingError, "str:8: Path 'section.sub' is already assigned"):
+        Parser().load_str(cfg)
+
+    cfg = Parser(set_is_replace=True).load_str(cfg)
+    assert cfg == {
+        'section': {
+            'key': 'value',
+            'sub': 'test' # Entire section 'section.sub' was replaced by 'test'
+        }
+    }
 
 def test_config_single_value_override_section():
     cfg = """\
@@ -727,10 +647,10 @@ def test_config_single_value_override_section():
     sub != test # This will cause section 'section.sub' to be replaced by a value!
     """
 
-    d = Parser(allow_section_split=True, nested_sections=True).load_str(cfg)
-    assert d == {
+    cfg = Parser().load_str(cfg)
+    assert cfg == {
         'section': {
             'key': 'value',
-            'sub': 'test' # Entire section 'section.sub' was replaced by value 'test'
+            'sub': 'test' # Entire section 'section.sub' was replaced by 'test'
         }
     }
