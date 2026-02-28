@@ -13,7 +13,6 @@ def cwd():
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     yield
     os.chdir(cwd)
-    print()
 
 def test_config_single():
     cfg = """ \
@@ -67,8 +66,6 @@ def test_explode_value():
             ]
         }
     }
-
-    print(cfg['section']['value'][5]) # type: ignore
 
 def test_config_single_from_file(cwd):
     cfg = Parser().load_file('configs/valid/001.cfg')
