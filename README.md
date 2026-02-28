@@ -48,23 +48,19 @@ Library also provides utilities for parsing a single file, parsing from string a
 
 ## Configuration `dict`
 
-Configuration dictionary returned by parsing is a specialized `dict` subclass, which provide access to nested entries using a flattened path.
+Configuration dictionary returned by parsing is a specialized `dict` subclass, which provides access to nested entries additionally by using a flattened path.
 
 Given this `dict`:
 
 ```py
-# This is a built-in dict
+# This is a built-in dict.
 cfg = {
     'section': {
         'key': 'value'
     }
 }
-```
 
-Both approaches would return the same inner variable:
-
-```py
-# m_conf.Config dict provides specialized accessors
+# m_conf.Config dict provides specialized accessors.
 cfg = m_conf.Config(cfg)
 
 # 'key' can be accessed using traditional way...
@@ -73,6 +69,6 @@ key = cfg['section']['key']
 # ... or it can be accessed using a flattened path:
 key_flat = cfg['section.key1']
 
-# Both access methods leads to the same referenced object
+# Both access methods lead to the same referenced object.
 assert key == key_flat and key is key_flat
 ```
